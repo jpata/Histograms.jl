@@ -78,9 +78,11 @@ function errors(h::Histogram, replace_nan=true, replace_0=true, replaceval=1.0)
     return errs
 end
 
-function findbin{T <: Real}(h::Histogram, v::T)
-    isnan(v) && return 1 #put nans in underflow bin
+function findbin(h::Histogram, v)
     isna(v) && return 1 #put NA in underflow bin
+
+    #guaranteed v::Real
+    isnan(v::Real) && return 1 #put nans in underflow bin
 
     v < h.bin_edges[1] &&
         error("underflow v=$v")
