@@ -50,16 +50,12 @@ edges(h::Histogram) = h.bin_edges
 entries(h::Histogram) = h.bin_entries
 nentries(h::Histogram) = int(sum(h.bin_entries))
 
-function subhist(h::Histogram, bins::AbstractArray)
-    entries = Int64[]
-    contents = Float64[]
-    edges = Float64[]
-    for b in bins
-        push!(entries, h.bin_entries[b])
-        push!(contents, h.bin_contents[b])
-        push!(edges, h.bin_edges[b])
-    end
-    return Histogram(entries, contents, edges)
+function subhist(h::Histogram, bins)
+    return Histogram(
+        h.bin_entries[bins],
+        h.bin_contents[bins],
+        h.bin_edges[bins]
+    )
 end
 
 function errors(h::Histogram, replace_nan=true, replace_0=true, replaceval=1.0)
@@ -121,8 +117,15 @@ function +(h1::Histogram, h2::Histogram)
         h1.bin_contents + h2.bin_contents,
         h1.bin_edges
     )
-    abs(integral(h1)+integral(h2)-integral(h)) < eps(Float64) ||
-        warn("problem adding histograms: $(integral(h1)) + (integral(h2)) != $(integral(h))")
+    abs(integral(h1)+integral(h2)-integral(h)) < 0.1 || #500.0 * eps(Float64) ||
+        warn(
+            "problem adding histograms: ",
+            "$(integral(h1)) + $(integral(h2)) != $(integral(h)) ",
+            "neps=", @sprintf(
+                "%.2f",
+                (integral(h1)+integral(h2)-integral(h))/eps(Float64)
+            )
+        )
     return h
 end
 
@@ -309,10 +312,18 @@ type NHistogram
     edges::Vector{Vector{Float64}}
 end
 
+edges(h::NHistogram) = h.edges
+
 function NHistogram(edges)
     nb = prod([length(e) for e in edges])
     baseh = Histogram([1:nb])
     NHistogram(baseh, edges)
+end
+
+function NHistogram(
+    entries::AbstractArray, contents::AbstractArray,
+    edges::AbstractArray)
+    fromarr(contents, entries, edges)
 end
 
 function ==(h1::NHistogram, h2::NHistogram)
@@ -359,7 +370,7 @@ function fromarr(nc, ne, edges)
     nb = prod([length(e) for e in edges])
     rsh(x) = reshape(x, nb)
     NHistogram(
-        Histogram(rsh(nc), rsh(ne), [1:nb]),
+        Histogram(rsh(ne), rsh(nc), [1:nb]),
         edges
     )
 end
@@ -418,11 +429,38 @@ function Base.sum(hs::AbstractArray{Histogram})
     reduce(+, Histogram(edges(fh)), hs)
 end
 
+function htodf(h::Histogram)
+    return DataFrame(
+        edges = edges(h),
+        entries = entries(h),
+        contents = contents(h)
+    )
+end
+
+function htodf(h::NHistogram)
+    return DataFrame(
+        edges = edges(h),
+        entries = entries(h),
+        contents = contents(h)
+    )
+end
+
+function set_zero(h::Histogram)
+    ent = entries(h)|>copy
+    ent[ent.<0] = 0
+    cont = contents(h)|>copy
+    cont[cont.<0] = 0
+
+    return Histogram(ent, cont, h.bin_edges)
+end
+
 
 export Histogram, hfill!
 export integral, nentries, normed, errors, findbin, nbins
 export +, -, *, /, ==
 #export todf, fromdf
+export subhist
+export htodf
 export flatten
 export lowedge, widths
 export rebin
@@ -431,6 +469,6 @@ export writecsv
 export test_ks
 export NHistogram, findbin_nd, ndims, asarr, readhist
 export contents, entries, edges
-export makehist_2d, fromarr
+export makehist_2d
 export project_x, project_y
 end #module

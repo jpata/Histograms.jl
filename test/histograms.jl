@@ -122,4 +122,11 @@ nht = transpose(nh)
 @test transpose(nht)==nh
 @test x == nh
 
+using Distributions
+p1 = Poisson(100)
+p2 = Poisson(10)
+
+x = rand(p1, 10000) ./ rand(p2, 10000)
+println("m=", mean(x), " s=", std(x))
+
 println("* histo.jl passed")
