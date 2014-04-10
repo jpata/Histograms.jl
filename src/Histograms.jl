@@ -32,6 +32,12 @@ immutable Histogram
         )
     end
 end
+#
+# import Base: .==
+# .==(h1::Histogram, h2::Histogram) =
+#     all(h1.bin_edges .== h2.bin_edges) &&
+#     all(h1.bin_contents .== h2.bin_contents) &&
+#     all(h1.bin_entries .== h2.bin_entries)
 
 #create empty histogram
 Histogram{R<:Real}(edges::Vector{R}) = Histogram(
@@ -58,7 +64,7 @@ function subhist(h::Histogram, bins)
     )
 end
 
-function errors(h::Histogram, replace_nan=true, replace_0=true, replaceval=1.0)
+function errors(h::Histogram, replace_nan=true, replace_0=true, replaceval=0.0)
     const errs = h.bin_contents ./ sqrt(h.bin_entries)
     const T = eltype(errs)
     for i=1:nbins(h)
@@ -335,7 +341,7 @@ end
 nbins(h::NHistogram) = prod([length(e) for e in h.edges])
 nbins(h::NHistogram, nd::Integer) = length(h.edges[nd])
 
-size(h::NHistogram) = length(h.edges)
+#size(h::NHistogram) = length(h.edges)
 ndims(h::NHistogram) = length(size(h))
 
 errors(h::NHistogram) = reshape(errors(h.baseh), Int64[length(e) for e in h.edges]...)
@@ -422,7 +428,8 @@ end
 project_x(nh::NHistogram) = Histogram(sum(nh|>entries, 1)[:], sum(nh|>contents, 1)[:], nh.edges[2])
 project_y(nh::NHistogram) = Histogram(sum(nh|>entries, 2)[:], sum(nh|>contents, 2)[:], nh.edges[1])
 
-Base.show(io::IO, h::Histogram) = show(io, hcat(h.bin_edges, h.bin_contents, h.bin_entries))
+Base.show(io::IO, h::Histogram) =
+    show(io, hcat(h.bin_edges, contents(h), errors(h), entries(h)))
 
 function Base.sum(hs::AbstractArray{Histogram})
     fh = first(hs)
