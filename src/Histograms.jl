@@ -8,6 +8,8 @@ import Base.show
 import Base.getindex
 import Base.size, Base.transpose
 
+using Distributions
+
 #represents a 1-D histogram with N bins
 immutable Histogram
 
@@ -66,6 +68,7 @@ end
 
 function errors(h::Histogram, replace_nan=true, replace_0=true, replaceval=0.0)
     const errs = h.bin_contents ./ sqrt(h.bin_entries)
+    errs[h.bin_entries .== 0] = 0
     const T = eltype(errs)
     for i=1:nbins(h)
         if replace_nan && isnan(errs[i])
@@ -473,7 +476,7 @@ export lowedge, widths
 export rebin
 export cumulative
 export writecsv
-export test_ks
+export test_ks, ks_pvalue
 export NHistogram, findbin_nd, ndims, asarr, readhist
 export contents, entries, edges
 export makehist_2d
