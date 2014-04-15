@@ -312,7 +312,12 @@ function ks_pvalue(h1::Histogram, h2::Histogram, n)
     for (_h1, _h2) in zip(hs1, hs2)
         push!(kss, test_ks(_h1, _h2))
     end
-    return count(x -> x > ks, kss) / length(kss)
+    mks = mean(kss)
+    if ks > mks
+        return count(x -> x > ks, kss) / length(kss)
+    else
+        return count(x -> x < ks, kss) / length(kss)
+    end
 end
 
 #Multidimensional histogram
