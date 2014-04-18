@@ -25,7 +25,7 @@ immutable Histogram
     function Histogram(entries::AbstractVector, contents::AbstractVector, edges::AbstractVector)
         @assert length(entries)==length(contents)
         @assert length(entries)==length(edges)
-        @assert all(entries .>= 0.0)
+        @assert all(entries .>= 0.0) string(join(entries, ","))
         @assert issorted(edges)
         new(
             convert(Vector{Float64}, entries),
@@ -250,20 +250,49 @@ end
 
 flatten(h::Histogram) = reshape(h, prod(size(h)))
 
-function rebin(h::Histogram, k::Integer)
-    @assert((nbins(h)) % k == 0, "number of bins $(nbins(h))+1 is not divisible by k=$k")
+#rebins a histogram , merging bins from first(range) to last(range)
+#with steps of step(range). Bins outside of the range are added as-is.
+function rebin(h::Histogram, range::Range{Int64}=1:0)
+
+    if length(range) == 0
+        range = 1:2:nbins(h)
+    end
+
+    k = step(range)
 
     new_entries = Float64[]
     new_contents = Float64[]
     new_edges = Float64[]
-    for i=1:k:nbins(h)
-        push!(new_contents, sum(h.bin_contents[i:i+k-1]))
-        push!(new_entries, sum(h.bin_entries[i:i+k-1]))
+
+    for i=1:first(range) - 1
+        #println("start $i")
+        push!(new_contents, h.bin_contents[i])
+        push!(new_entries, h.bin_entries[i])
         push!(new_edges, h.bin_edges[i])
     end
-    #push!(new_edges, h.bin_edges[nbins(h)+1])
+
+    nb = nbins(h)
+
+    for i in range
+        r = i:i+k-1
+        #println("r=$r")
+        last(r) <= nbins(h) || error("incorrect range=$range, r=$r")
+        push!(new_contents, sum(contents(h)[r]))
+        push!(new_entries, sum(entries(h)[r]))
+        push!(new_edges, h.bin_edges[i])
+    end
+
+    for i in last(range)+k:nbins(h)
+        #println("end $i")
+        push!(new_contents, h.bin_contents[i])
+        push!(new_entries, h.bin_entries[i])
+        push!(new_edges, h.bin_edges[i])
+    end
+
     return Histogram(new_entries, new_contents, new_edges)
 end
+
+rebin(h::Histogram, k::Integer) = rebin(h, 1:k:nbins(h))
 
 function cumulative(h::Histogram)
     #hc = Histogram(h)
@@ -437,7 +466,10 @@ project_x(nh::NHistogram) = Histogram(sum(nh|>entries, 1)[:], sum(nh|>contents, 
 project_y(nh::NHistogram) = Histogram(sum(nh|>entries, 2)[:], sum(nh|>contents, 2)[:], nh.edges[1])
 
 Base.show(io::IO, h::Histogram) =
-    show(io, hcat(h.bin_edges, contents(h), errors(h), entries(h)))
+    write(io,
+        "histogram: \n",
+        hcat(h.bin_edges, contents(h), errors(h), entries(h)) |> string
+    )
 
 function Base.sum(hs::AbstractArray{Histogram})
     fh = first(hs)
@@ -486,4 +518,6 @@ export NHistogram, findbin_nd, ndims, asarr, readhist
 export contents, entries, edges
 export makehist_2d
 export project_x, project_y
+export fromarr
+
 end #module

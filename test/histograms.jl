@@ -3,8 +3,8 @@ using Base.Test
 using DataFrames
 
 #Creation
-@test_throws Histogram([1],[1],[0,1])
-@test_throws Histogram([-1],[1],[0])
+@test_throws ErrorException Histogram([1],[1],[0,1])
+@test_throws ErrorException Histogram([-1],[1],[0])
 
 h = Histogram([-Inf, -1, 0, 1, Inf])
 
@@ -51,26 +51,25 @@ hs=sum([h])
 hs = Histogram([2],[2],[0])
 @test 2 * hs == Histogram([2], [4], [0])
 @test 0.5 * hs == Histogram([2], [1], [0])
-# println(
-# 	Histogram([100], [10], [0]) / Histogram([10], [5], [0]) -
-# 	Histogram([9.090909090909092], [2], [0])
-# )
-
 
 #Errors
 hs = Histogram([100, 0], [10, 0], [0, 1])
-@test all(errors(hs) .== Float64[1.0, 1.0])
+@test all(errors(hs) .== Float64[1.0, 0.0])
 
 #rebinning
 h = Histogram([1,2],[3,4],[1,2])
-@test rebin(h, 2)==Histogram([3],[7],[1])
+println(rebin(h, 2))
+@test rebin(h, 2) == Histogram([3],[7],[1])
 @test rebin(
-		Histogram([1,2,3, 0,1,2],[3,4,5, 0,4,5], [1,2,3, 4,5,6]),
+		Histogram([1,2,3, 0,1,2], [3,4,5, 0,4,5], [1,2,3, 4,5,6]),
 		3
 	) ==
 	Histogram([6, 3], [12, 9], [1, 4])
 
-@test_throws rebin(Histogram([1,2],[3,4],[1,2,3]), 3)
+@test_throws ErrorException rebin(Histogram([1,2],[3,4],[1,2]), 3)
+
+@test rebin(Histogram([1, 2, 3, 4], [1, 2, 3, 4], [-Inf, 0, 1, Inf]), 2:2:3) ==
+	Histogram([1, 5, 4], [1, 5, 4], [-Inf, 0, Inf])
 
 #Comparison of histograms
 h = Histogram([1,2],[3,4],[1,2])
@@ -121,12 +120,5 @@ nht = transpose(nh)
 @test nht[2,3]==nh[3,2]
 @test transpose(nht)==nh
 @test x == nh
-
-using Distributions
-p1 = Poisson(100)
-p2 = Poisson(10)
-
-x = rand(p1, 10000) ./ rand(p2, 10000)
-println("m=", mean(x), " s=", std(x))
 
 println("* histo.jl passed")
