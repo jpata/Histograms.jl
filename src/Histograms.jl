@@ -333,19 +333,49 @@ end
 
 #dices the two histograms and returns the fraction(p-value) of KS-test
 #values that are greater than between h1, h2
-function ks_pvalue(h1::Histogram, h2::Histogram, n)
+function ks_pvalue(h1::Histogram, h2::Histogram, n::Integer=10000, kind=:onesided)
     const ks = test_ks(h1, h2)
     hs1 = sample_hist(h1, n)
-    hs2 = sample_hist(h2, n)
-    kss = Any[]
-    for (_h1, _h2) in zip(hs1, hs2)
-        push!(kss, test_ks(_h1, _h2))
+    #hs2 = sample_hist(h2, n)
+    kss = zeros(n^2)
+
+    #get expected distribution of KS value under hypothesis of same shape
+    k = 0
+    for i=1:n
+        for j=1:n
+            i == j && continue
+            #push!(kss, test_ks(hs1[i], hs1[j]))
+            k += 1
+            kss[k] = test_ks(hs1[i], hs1[j])
+        end
     end
+    kss = kss[1:k]
+
+    # for (_h1, _h2) in zip(hs1, hs2)
+    #     push!(kss, test_ks(_h1, _h2))
+    # end
+
     mks = mean(kss)
-    if ks > mks
-        return count(x -> x > ks, kss) / length(kss)
-    else
-        return count(x -> x < ks, kss) / length(kss)
+    s = std(kss)
+
+    println("ks = $ks, mean=$mks, std=$s")
+
+    if kind==:onesided
+        local dk
+        if ks > mks
+            dk = sum(kss .> ks)
+        else
+            dk = sum(kss .< ks)
+        end
+        println("one-sided KS test: n=$dk")
+        return dk / length(kss)
+    elseif kind==:twosided
+        dk = abs(mks-ks)
+
+        posside = sum(kss .> (mks + dk))
+        negside = sum(kss .< (mks - dk))
+        println("two-sided KS test: n_up=$posside, n_down=$negside")
+        return (posside + negside) / length(kss)
     end
 end
 
@@ -501,6 +531,12 @@ function set_zero(h::Histogram)
     return Histogram(ent, cont, h.bin_edges)
 end
 
+function divide_noerr(a::Histogram, b::Histogram)
+    hr = a/b
+    hr = Histogram(0.0 * hr.bin_entries, hr.bin_contents, hr.bin_edges)
+    return hr
+end
+
 
 export Histogram, hfill!
 export integral, nentries, normed, errors, findbin, nbins
@@ -517,6 +553,7 @@ export test_ks, ks_pvalue
 export NHistogram, findbin_nd, ndims, asarr, readhist
 export contents, entries, edges
 export makehist_2d
+export divide_noerr
 export project_x, project_y
 export fromarr
 
