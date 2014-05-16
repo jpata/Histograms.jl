@@ -25,7 +25,8 @@ immutable Histogram
     function Histogram(entries::AbstractVector, contents::AbstractVector, edges::AbstractVector)
         @assert length(entries)==length(contents)
         @assert length(entries)==length(edges)
-        @assert all(entries .>= 0.0) string(join(entries, ","))
+        #@assert all(entries .>= 0.0) string("entries = ", join(entries, ","))
+        #@assert all(abs(entries) .< Inf) string("entries = ", join(entries, ","))
         @assert issorted(edges)
         new(
             convert(Vector{Float64}, entries),
@@ -293,6 +294,7 @@ function rebin(h::Histogram, range::Range{Int64}=1:0)
 end
 
 rebin(h::Histogram, k::Integer) = rebin(h, 1:k:nbins(h))
+rebin_uoflow(h::Histogram, k::Integer) = rebin(h, 2:k:nbins(h)-k-1)
 
 function cumulative(h::Histogram)
     #hc = Histogram(h)
