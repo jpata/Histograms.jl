@@ -1,562 +1,171 @@
 module Histograms
-using DataArrays, DataFrames
 
-import Base.+, Base.-, Base.*, Base./, Base.==, Base.ndims
-import Base.sum
+using StatsBase
 
-import Base.show
-import Base.getindex
-import Base.size, Base.transpose
+import Base.ndims
+import Base.push!, Base.+
 
-using Distributions
+nbins(h::AbstractHistogram) = map(x->size(x, 1) - 1, edges(h))
+nbins(h::AbstractHistogram, i::Int) = size(edges(h)[i], 1)
+edges(h::AbstractHistogram) = h.edges
 
-#represents a 1-D histogram with N bins
-immutable Histogram
+contents(h::Histogram) = h.weights
+integral(h::Histogram) = sum(h.weights)
+entries(h::Histogram) = contents(h)
 
-    #N floats with the number of unweighted entries in the bins
-    bin_entries::Vector{Float64}
+integral{T<:Real, N, E}(h::AbstractHistogram{T, N, E}, ndims=1:N) =
+    first(sum(contents(h), ndims))
 
-    #N floats with the number of weighted entries in the bins
-    bin_contents::Vector{Float64}
+import Base.mean
 
-    #N floats with the lower edges of the bins. bin_edges[N] is the upper edge.
-    bin_edges::Vector{Float64}
-
-    function Histogram(entries::AbstractVector, contents::AbstractVector, edges::AbstractVector)
-        @assert length(entries)==length(contents)
-        @assert length(entries)==length(edges)
-        #@assert all(entries .>= 0.0) string("entries = ", join(entries, ","))
-        #@assert all(abs(entries) .< Inf) string("entries = ", join(entries, ","))
-        @assert issorted(edges)
-        new(
-            convert(Vector{Float64}, entries),
-            convert(Vector{Float64}, contents),
-            convert(Vector{Float64}, edges)
-        )
-    end
-end
-#
-# import Base: .==
-# .==(h1::Histogram, h2::Histogram) =
-#     all(h1.bin_edges .== h2.bin_edges) &&
-#     all(h1.bin_contents .== h2.bin_contents) &&
-#     all(h1.bin_entries .== h2.bin_entries)
-
-#create empty histogram
-Histogram{R<:Real}(edges::Vector{R}) = Histogram(
-    Float64[0.0 for i=1:length(edges)],
-    Float64[0.0 for i=1:length(edges)],
-    edges
-)
-
-Histogram(h::Histogram) = Histogram(h.bin_entries, h.bin_contents, h.bin_edges)
-
-#account for the under- and overflow bins
-nbins(h::Histogram) = length(h.bin_contents)
-
-contents(h::Histogram) = h.bin_contents
-edges(h::Histogram) = h.bin_edges
-entries(h::Histogram) = h.bin_entries
-nentries(h::Histogram) = int(sum(h.bin_entries))
-
-function subhist(h::Histogram, bins)
-    return Histogram(
-        h.bin_entries[bins],
-        h.bin_contents[bins],
-        h.bin_edges[bins]
-    )
-end
-
-function errors(h::Histogram, replace_nan=true, replace_0=true, replaceval=0.0)
-    const errs = h.bin_contents ./ sqrt(h.bin_entries)
-    errs[h.bin_entries .== 0] = 0
-    const T = eltype(errs)
-    for i=1:nbins(h)
-        if replace_nan && isnan(errs[i])
-            errs[i] = replaceval
+function mean{T<:Real, N, E}(h::AbstractHistogram{T, N, E}, ndims=1:N)
+    ret = Array(Float64, length(ndims))
+    for (ind, ndim) in enumerate(ndims)
+        mids = Base.midpoints(edges(h)[ndim])
+        tot = 0
+        otherdims = collect(1:N)
+        deleteat!(otherdims, ndim)
+        
+        for (midp, w) in zip(mids, sum(contents(h), otherdims))
+            tot += midp * w
         end
+        ret[ind] = tot
+    end
+    return ret / integral(h)
+end
 
-        #in case of zero bins, put error to replaceval
-        if replace_0 && errs[i] < eps(T)
-            errs[i] = replaceval
+type ErrorHistogram{T<:Real, N, E} <: AbstractHistogram{T, N, E}
+    edges::E
+    weights::Array{T,N}
+    weights_sq::Array{T,N}
+    closed::Symbol
+    function ErrorHistogram(
+        edges::NTuple{N,AbstractArray},
+        weights::Array{T,N},
+        weights_sq::Array{T,N},
+        closed::Symbol)
+        for edg in edges
+            issorted(edg) || error("edges must be sorted: $edg")
         end
-    end
-    return errs
+        closed == :right || closed == :left || error("closed must :left or :right")
+        map(x -> length(x)-1,edges) == size(weights) || error("Histogram edge vectors must be 1 longer than corresponding weight dimensions")
+        new(edges, weights, weights_sq, closed)
+    end 
 end
 
-function findbin(h::Histogram, v)
-    isna(v) && return 1 #put NA in underflow bin
-
-    #guaranteed v::Real
-    isnan(v::Real) && return 1 #put nans in underflow bin
-
-    v < h.bin_edges[1] &&
-        error("underflow v=$v")
-    v >= h.bin_edges[nbins(h)] &&
-        error("overflow v=$v, min=$(minimum(h.bin_edges)), max=$(maximum(h.bin_edges))")
-
-    const idx = searchsortedfirst(h.bin_edges, v)::Int64 - 1
-    if (idx<1 || idx>length(h.bin_entries))
-        error("bin index out of range: i=$(idx), v=$(v)")
-    end
-    return idx
-end
-
-
-function hfill!{T <: Real, K <: Real}(h::Histogram, v::T, w::K=1.0)
-    const low = findbin(h, v)
-    h.bin_entries[low] += 1
-    h.bin_contents[low] += isnan(w) ? 0.0 : w
-end
-
-function hfill!{T <: Real}(h::Histogram, v::NAtype, w::Union(T, NAtype)=1.0)
-    h.bin_entries[1] += 1
-    h.bin_contents[1] += isnan(w) ? 0.0 : w
-end
-
-function hfill!{T <: Real}(h::Histogram, v::T, w::NAtype)
-    h.bin_entries[1] += 1
-    h.bin_contents[1] += 0
-end
-
-#Histogram algebra
-function +(h1::Histogram, h2::Histogram)
-    @assert h1.bin_edges == h2.bin_edges
-    h = Histogram(
-        h1.bin_entries + h2.bin_entries,
-        h1.bin_contents + h2.bin_contents,
-        h1.bin_edges
-    )
-    abs(integral(h1)+integral(h2)-integral(h)) < 0.1 || #500.0 * eps(Float64) ||
-        warn(
-            "problem adding histograms: ",
-            "$(integral(h1)) + $(integral(h2)) != $(integral(h)) ",
-            "neps=", @sprintf(
-                "%.2f",
-                (integral(h1)+integral(h2)-integral(h))/eps(Float64)
-            )
-        )
-    return h
-end
-
-function +(h1::Histogram, x::Real)
-    nb = nbins(h1)
-    h2 = Histogram([0.0 for n=1:nb], [x for n=1:nb], h1.bin_edges)
-    return h1+h2
-end
-
-+(x::Real, h1::Histogram) = h1+x
-
-function ==(h1::Histogram, h2::Histogram)
-    ret = h1.bin_edges == h2.bin_edges
-    ret = ret && (h1.bin_contents==h2.bin_contents)
-    ret = ret && (h1.bin_entries==h2.bin_entries)
-end
-
--(h1::Histogram, h2::Histogram) = h1 + (-1.0 * h2)
-
-function *{T <: Real}(h1::Histogram, x::T)
-    return Histogram(h1.bin_entries, h1.bin_contents * x, h1.bin_edges)
-end
-
-function *{T <: Real}(x::T, h1::Histogram)
-    return h1 * x
-end
-
-function *(h1::Histogram, h2::Histogram)
-    @assert(h1.bin_edges == h2.bin_edges, "bin edges must be the same for both histograms")
-    conts = h1.bin_contents.* h2.bin_contents
-    ents = 1.0 / (1.0 ./ entries(h1) + 1.0 ./ entries(h2))
-
-    conts[isnan(conts)] = 0.0
-    ents[isnan(ents)] = 0.0
-
-    Histogram(ents, conts, h1.bin_edges)
-end
-
-
-function /{T <: Real}(h1::Histogram, x::T)
-    return h1 * (1.0 / x)
-end
-
-#err / C = sqrt((err1/C1)^2 + (err2/C2)^2)
-function /(h1::Histogram, h2::Histogram)
-    @assert(h1.bin_edges == h2.bin_edges,
-        "bin edges must be the same for both histograms"
-    )
-
-    const _contents = h1.bin_contents ./ h2.bin_contents
-    const _entries = 1.0 ./ (1.0 ./ entries(h1) + 1.0 ./ entries(h2))
-
-    #Replace NaN-s resulting from /0 by 0
-    _contents[isnan(_contents)] = 0.0
-    _entries[isnan(_entries)] = 0.0
-
-    return Histogram(_entries, _contents, h1.bin_edges)
-
-end
-
-#
-integral(h::Histogram) = sum(h.bin_contents)
-integral(x::Real) = x
-
-function integral(h::Histogram, x1::Real, x2::Real)
-    if !(x1 in h.bin_edges) || !(x2 in h.bin_edges)
-        warn("integration will be inexact due to binning")
-    end
-    a = searchsorted(h.bin_edges, x1).start
-    b = searchsorted(h.bin_edges, x2).start
-    return sum(h.bin_contents[a:b])
-end
-
-#returns the low edges of a list of histogram edges
-lowedge(arr) = arr[1:length(arr)-1];
-widths(arr) = [arr[i+1]-arr[i] for i=1:length(arr)-1]
-
-function normed{T <: Histogram}(h::T)
-    i = integral(h)
-    return i > 0 ? h/i : error("histogram integral was $i")
-end
-
-#function fromdf(df::DataFrame)
-#    edges = df[1]
-#    conts = df[2][1:nrow(df)-1]
-#    entries = df[3][1:nrow(df)-1]
-#    return Histogram(entries, conts, edges)
-#end
-
-#assumes df columns are entries, contents, edges
-#length(entries) = length(contents) = length(edges) - 1, edges are lower, lower, lower, ..., upper
-# function fromdf(df::DataFrame; entries=:entries)
-#     ent = df[2].data
-#     cont = df[3].data
-
-#     #entries column reflects poisson errors of the contents column
-#     if entries == :poissonerrors
-#         ent = (cont ./ ent ) .^ 2
-#         ent = Float64[x > 0 ? x : 0 for x in ent]
-#     #entries column reflects raw entries/events
-#     elseif entries == :entries
-#         ent = ent
-#     else
-#         error("unknown value for keyword :entries=>$(entries)")
-#     end
-
-#     Histogram(
-#         ent, #entries
-#         cont, #contents
-#         df[1].data #edges
-#     )
-# end
-
-flatten(h::Histogram) = reshape(h, prod(size(h)))
-
-#rebins a histogram , merging bins from first(range) to last(range)
-#with steps of step(range). Bins outside of the range are added as-is.
-function rebin(h::Histogram, range::Range{Int64}=1:0)
-
-    if length(range) == 0
-        range = 1:2:nbins(h)
-    end
-
-    k = step(range)
-
-    new_entries = Float64[]
-    new_contents = Float64[]
-    new_edges = Float64[]
-
-    for i=1:first(range) - 1
-        #println("start $i")
-        push!(new_contents, h.bin_contents[i])
-        push!(new_entries, h.bin_entries[i])
-        push!(new_edges, h.bin_edges[i])
-    end
-
-    nb = nbins(h)
-
-    for i in range
-        r = i:i+k-1
-        #println("r=$r")
-        last(r) <= nbins(h) || error("incorrect range=$range, r=$r")
-        push!(new_contents, sum(contents(h)[r]))
-        push!(new_entries, sum(entries(h)[r]))
-        push!(new_edges, h.bin_edges[i])
-    end
-
-    for i in last(range)+k:nbins(h)
-        #println("end $i")
-        push!(new_contents, h.bin_contents[i])
-        push!(new_entries, h.bin_entries[i])
-        push!(new_edges, h.bin_edges[i])
-    end
-
-    return Histogram(new_entries, new_contents, new_edges)
-end
-
-rebin(h::Histogram, k::Integer) = rebin(h, 1:k:nbins(h))
-rebin_uoflow(h::Histogram, k::Integer) = rebin(h, 2:k:nbins(h)-k-1)
-
-function cumulative(h::Histogram)
-    #hc = Histogram(h)
-    cont = deepcopy(h.bin_contents)
-    ent = deepcopy(h.bin_contents)
-    for i=1:length(h.bin_contents)
-        cont[i] = sum(h.bin_contents[1:i])
-        ent[i] = sum(h.bin_entries[1:i])
-    end
-    return Histogram(ent, cont, h.bin_edges)
-end
-
-#dices from the number of entries in the histogram
-function sample_hist(h::Histogram, n=1000)
-    pois = Any[e>0 ? Poisson(e) : Poisson(1) for e in h.bin_entries]
-
-    #ratio between Nentries, Nweighted
-    wr = sum(h.bin_contents) / sum(h.bin_entries)
-    hists = Any[]
-
-    for i=1:n
-        bins = map(rand, pois)
-        push!(hists, Histogram(bins, bins./wr, h.bin_edges))
-    end
-    hists
-end
-
-#Histogram comparison tests
-
-#returns the Kolmogorov-Smirnov test statistic
-function test_ks(h1::Histogram, h2::Histogram)
-    ch1 = cumulative(h1)
-    ch2 = cumulative(h2)
-    ch1 = ch1 / integral(h1)
-    ch2 = ch2 / integral(h2)
-    return maximum(abs(ch1.bin_contents - ch2.bin_contents))
-end
-
-#dices the two histograms and returns the fraction(p-value) of KS-test
-#values that are greater than between h1, h2
-function ks_pvalue(h1::Histogram, h2::Histogram, n::Integer=10000, kind=:onesided)
-    const ks = test_ks(h1, h2)
-    hs1 = sample_hist(h1, n)
-    #hs2 = sample_hist(h2, n)
-    kss = zeros(n^2)
-
-    #get expected distribution of KS value under hypothesis of same shape
-    k = 0
-    for i=1:n
-        for j=1:n
-            i == j && continue
-            #push!(kss, test_ks(hs1[i], hs1[j]))
-            k += 1
-            kss[k] = test_ks(hs1[i], hs1[j])
-        end
-    end
-    kss = kss[1:k]
-
-    # for (_h1, _h2) in zip(hs1, hs2)
-    #     push!(kss, test_ks(_h1, _h2))
-    # end
-
-    mks = mean(kss)
-    s = std(kss)
-
-    println("ks = $ks, mean=$mks, std=$s")
-
-    if kind==:onesided
-        local dk
-        if ks > mks
-            dk = sum(kss .> ks)
-        else
-            dk = sum(kss .< ks)
-        end
-        println("one-sided KS test: n=$dk")
-        return dk / length(kss)
-    elseif kind==:twosided
-        dk = abs(mks-ks)
-
-        posside = sum(kss .> (mks + dk))
-        negside = sum(kss .< (mks - dk))
-        println("two-sided KS test: n_up=$posside, n_down=$negside")
-        return (posside + negside) / length(kss)
-    end
-end
-
-#Multidimensional histogram
-type NHistogram
-    baseh::Histogram
-    edges::Vector{Vector{Float64}}
-end
-
-edges(h::NHistogram) = h.edges
-
-function NHistogram(edges)
-    nb = prod([length(e) for e in edges])
-    baseh = Histogram([1:nb])
-    NHistogram(baseh, edges)
-end
-
-function NHistogram(
-    entries::AbstractArray, contents::AbstractArray,
-    edges::AbstractArray)
-    fromarr(contents, entries, edges)
-end
-
-function ==(h1::NHistogram, h2::NHistogram)
-    ret = h1.edges == h2.edges
-    ret = ret && h1.baseh == h2.baseh
-    return ret
-end
-
-nbins(h::NHistogram) = prod([length(e) for e in h.edges])
-nbins(h::NHistogram, nd::Integer) = length(h.edges[nd])
-
-#size(h::NHistogram) = length(h.edges)
-ndims(h::NHistogram) = length(size(h))
-
-errors(h::NHistogram) = reshape(errors(h.baseh), Int64[length(e) for e in h.edges]...)
-nentries(h::NHistogram) = nentries(h.baseh)
-integral(h::NHistogram) = integral(h.baseh)
-
-function +(h1::NHistogram, h2::NHistogram)
-    @assert h1.edges == h2.edges
-    return NHistogram(h1.baseh+h2.baseh, h1.edges)
-end
-
-function *{T <: Real}(h::NHistogram, x::T)
-    return NHistogram(x * h.baseh, h.edges)
-end
-
-function *{T <: Real}(x::T, h::NHistogram)
-    return h * x
-end
-
-function /(h1::NHistogram, h2::NHistogram)
-    @assert h1.edges == h2.edges
-    return NHistogram(h1.baseh / h2.baseh, h1.edges)
-end
-
-
-function asarr(h::NHistogram)
-    return reshape(h.baseh.bin_contents, Int64[length(e) for e in h.edges]...),
-    reshape(h.baseh.bin_entries, Int64[length(e) for e in h.edges]...)
-end
-
-function fromarr(nc, ne, edges)
-    nb = prod([length(e) for e in edges])
-    rsh(x) = reshape(x, nb)
-    NHistogram(
-        Histogram(rsh(ne), rsh(nc), [1:nb]),
-        edges
+Hist1D = ErrorHistogram{Float64, 1, Tuple{Vector{Float64}, }}
+Hist2D = ErrorHistogram{Float64, 2, Tuple{Vector{Float64}, Vector{Float64}} }
+Hist3D = ErrorHistogram{Float64, 2, Tuple{Vector{Float64}, Vector{Float64}, Vector{Float64}}}
+
+function ErrorHistogram(edges...)
+    T = Float64
+    N = length(edges)
+    E = typeof(edges)
+
+    return ErrorHistogram{T, N, E}(
+        edges,
+        zeros(T, map(x->size(x, 1) - 1, edges)...),
+        zeros(T, map(x->size(x, 1) - 1, edges)...),
+        :left
     )
 end
 
-function Base.transpose(nh::NHistogram)
-    nc, ne = asarr(nh)
-    fromarr(transpose(ne), transpose(nc), nh.edges|>reverse|>collect)
-end
 
-contents(h::NHistogram) = asarr(h)[1]
-entries(h::NHistogram) = asarr(h)[2]
-Base.size(h::NHistogram) = tuple([length(e) for e in h.edges]...)
 
-function findbin_nd(h::NHistogram, v)
-    const nd = length(v)
-    @assert ndims(h)==nd
-    const idxs = Int64[-1 for i=1:nd]
-    for i=1:nd
-        const x = v[i]
-        const j = (isna(x) || isnan(x)) ? 1 : (searchsortedfirst(h.edges[i], x) - 1)
-        (j < 1 || j > length(h.edges[i])) && error("overflow dim=$i, v=$x")
-        idxs[i] = j
+function push!{T, N, E, X <: Real, W <: Real}(
+    h::ErrorHistogram{T,N,E},
+    xs::NTuple{N,X},
+    w::W
+    )
+    idxs = if h.closed == :right
+        map((edge, x) -> searchsortedfirst(edge,x) - 1, h.edges, xs)
+    else
+        map(searchsortedlast, h.edges, xs)
     end
-    return idxs
+
+    try
+        h.weights[idxs...] += w
+        h.weights_sq[idxs...] += w^2
+    catch e
+        isa(e,BoundsError) || rethrow(e)
+    end
+    h
 end
 
-#is slow
-function hfill!{K <:Real}(h::NHistogram, v, w::K=1.0)
-    a, b = asarr(h)
-    xb = findbin_nd(h, v)
-    a[xb...] += w
-    b[xb...] += 1
-end
-
-function hfill!{K <: NAtype}(h::NHistogram, v, w::K)
-    warn("NA weight in NHistogram")
-    #a, b = asarr(h)
-    #xb = findbin_nd(h, v)
-    #a[xb...] += 0
-    #b[xb...] += 1
-end
-
-function Base.getindex(nh::NHistogram, args...)
-    a, b = asarr(nh)
-    return a[args...]#, b[args...]
-end
-
-
-project_x(nh::NHistogram) = Histogram(sum(nh|>entries, 1)[:], sum(nh|>contents, 1)[:], nh.edges[2])
-project_y(nh::NHistogram) = Histogram(sum(nh|>entries, 2)[:], sum(nh|>contents, 2)[:], nh.edges[1])
-
-Base.show(io::IO, h::Histogram) =
-    write(io,
-        "histogram: \n",
-        hcat(h.bin_edges, contents(h), errors(h), entries(h)) |> string
+function push!{T, E, X <: Real, W <: Real}(
+    h::ErrorHistogram{T,1,E}, x::X, w::W
     )
+    i = if h.closed == :right 
+        searchsortedfirst(edges(h)[1], x) - 1 
+    else
+        searchsortedlast(edges(h)[1], x)
+    end
 
-function Base.sum(hs::AbstractArray{Histogram})
-    fh = first(hs)
-    reduce(+, Histogram(edges(fh)), hs)
+    if 1 <= i <= length(h.weights)
+        @inbounds h.weights[i] += w
+        @inbounds h.weights_sq[i] += w^2
+    end
+    h
 end
 
-function htodf(h::Histogram)
-    return DataFrame(
-        edges = edges(h),
-        entries = entries(h),
-        contents = contents(h)
+nbins(h::ErrorHistogram) = map(x->size(x, 1) - 1, edges(h))
+ndims{T, N, E}(h::ErrorHistogram{T, N, E}) = N
+
+errors(h::ErrorHistogram) =  sqrt(h.weights_sq)
+errorssq(h::ErrorHistogram) =  h.weights_sq
+contents(h::ErrorHistogram) = h.weights
+edges(h::ErrorHistogram) = h.edges
+entries(h::ErrorHistogram) = sum(contents(h))^2 / sum(errorssq(h))
+
+normalize(h::Histogram) = Histogram(h.edges, h.weights/sum(h.weights))
+function normalize{T<:Real, N, E}(h::ErrorHistogram{T, N, E})
+    sw = sum(h.weights)
+    ErrorHistogram{T, N, E}(h.edges, h.weights/sw, h.weights_sq, h.closed)
+end
+
+function +{T1<:Real, T2<:Real, N, E}(h1::ErrorHistogram{T1, N, E}, h2::ErrorHistogram{T2, N, E})
+    @assert ndims(h1) == ndims(h2)
+    @assert nbins(h1) == nbins(h2)
+    @assert h1.closed == h2.closed
+
+    for i=1:ndims(h1)
+        @assert all(edges(h1)[i] .== edges(h2)[i])
+    end
+
+    return ErrorHistogram{T1, N, E}(
+        edges(h1),
+        contents(h1) .+ contents(h2),
+        h1.weights_sq .+ h2.weights_sq,
+        h1.closed
     )
 end
 
-function htodf(h::NHistogram)
-    return DataFrame(
-        edges = edges(h),
-        entries = entries(h),
-        contents = contents(h)
-    )
+integralerror{T<:Real, N, E}(h::ErrorHistogram{T, N, E}, ndims=1:N) =
+    first(sqrt(sum(errorssq(h), ndims)))
+
+import Base.mean
+function mean(h::Hist1D)
+    l = 0.0
+    mids = midpoints(h.edges[1][2:end-1])
+    for i=2:nbins(h)[1]-1
+        l += mids[i-1] * h.weights[i]
+    end
+    return l / sum(h.weights)
 end
 
-function set_zero(h::Histogram)
-    ent = entries(h)|>copy
-    ent[ent.<0] = 0
-    cont = contents(h)|>copy
-    cont[cont.<0] = 0
-
-    return Histogram(ent, cont, h.bin_edges)
+import Base.std
+function std(h::Hist1D)
+    l = 0.0
+    mids = midpoints(h.edges[1][2:end-1])
+    m = mean(h)
+    for i=2:nbins(h)[1]-1
+        l += (mids[i-1] - m)^2 * h.weights[i] 
+    end
+    return sqrt(l / sum(h.weights))
 end
 
-function divide_noerr(a::Histogram, b::Histogram)
-    hr = a/b
-    hr = Histogram(0.0 * hr.bin_entries, hr.bin_contents, hr.bin_edges)
-    return hr
+export nbins, edges, contents, errors, integral
+export normalize, entries
+export ErrorHistogram, Hist1D, Hist2D, Hist3D
+export +
 end
-
-
-export Histogram, hfill!
-export integral, nentries, normed, errors, findbin, nbins
-export +, -, *, /, ==
-#export todf, fromdf
-export subhist
-export htodf
-export flatten
-export lowedge, widths
-export rebin
-export cumulative
-export writecsv
-export test_ks, ks_pvalue
-export NHistogram, findbin_nd, ndims, asarr, readhist
-export contents, entries, edges
-export makehist_2d
-export divide_noerr
-export project_x, project_y
-export fromarr
-
-end #module
